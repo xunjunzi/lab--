@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>实验室仪器登记管理系统</title>
+  <title>实验室仪器登记管理系统 - IndexedDB版</title>
   <style>
     * {
       margin: 0;
@@ -164,27 +164,35 @@
       align-items: center;
       gap: 4px;
       border-radius: 30px;
+      cursor: pointer;
+      border: none;
+      font-weight: 600;
+      transition: 0.2s;
+    }
+    .btn-small:active {
+      transform: scale(0.95);
     }
     .btn-danger {
       background: #ef4444;
       color: white;
-      border: none;
     }
     .btn-success {
       background: #10b981;
       color: white;
-      border: none;
     }
     .btn-warning {
       background: #f59e0b;
       color: white;
-      border: none;
     }
     .btn-export {
       background: #1e293b;
       color: white;
-      border: none;
       margin-top: 12px;
+    }
+    .btn-backup {
+      background: #6366f1;
+      color: white;
+      margin-top: 8px;
     }
     .flex-row {
       display: flex;
@@ -262,29 +270,169 @@
       color: #94a3b8;
       margin-top: 4px;
     }
+    .alert {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 16px;
+      font-size: 0.8rem;
+      color: #991b1b;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 4px;
+      background: #e2e8f0;
+      border-radius: 2px;
+      margin-top: 8px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #4f46e5;
+      border-radius: 2px;
+      transition: width 0.3s;
+    }
   </style>
 </head>
 <body>
-<div class="app-container" id="appContainer"></div>
+<div class="app-container" id="appContainer">
+  <div class="screen" style="justify-content: center; align-items: center;">
+    <h2>⏳ 加载中...</h2>
+  </div>
+</div>
 
 <script>
   (function() {
-    // ---------- 存储引擎 ----------
-    const STORAGE = {
-      USERS: 'lab4_users',
-      INSTRUMENTS: 'lab4_instruments',
-      RECORDS: 'lab4_records',
-      CURRENT: 'lab4_current'
-    };
+    // ========== IndexedDB 数据库封装 ==========
+    const DB_NAME = 'LabInstrumentDB';
+    const DB_VERSION = 1;
+    let db = null;
 
-    // 仪器状态枚举
+    // 打开数据库
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          // 创建对象仓库
+          if (!db.objectStoreNames.contains('users')) {
+            db.createObjectStore('users', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('instruments')) {
+            db.createObjectStore('instruments', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('records')) {
+            const recordsStore = db.createObjectStore('records', { keyPath: 'id' });
+            recordsStore.createIndex('userId', 'userId', { unique: false });
+            recordsStore.createIndex('instrumentId', 'instrumentId', { unique: false });
+            recordsStore.createIndex('createdAt', 'createdAt', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('currentUser')) {
+            db.createObjectStore('currentUser', { keyPath: 'id' });
+          }
+        };
+        
+        request.onsuccess = (event) => {
+          db = event.target.result;
+          resolve(db);
+        };
+        
+        request.onerror = (event) => {
+          reject(event.target.error);
+        };
+      });
+    }
+
+    // 通用读取所有数据
+    function getAll(storeName) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, 'readonly');
+        const store = transaction.objectStore(storeName);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    // 通用保存数据
+    function put(storeName, data) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, 'readwrite');
+        const store = transaction.objectStore(storeName);
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    // 通用删除数据
+    function remove(storeName, id) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, 'readwrite');
+        const store = transaction.objectStore(storeName);
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    // 清空仓库
+    function clearStore(storeName) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, 'readwrite');
+        const store = transaction.objectStore(storeName);
+        const request = store.clear();
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    // ========== 数据初始化 ==========
     const STATUS = {
       AVAILABLE: '可使用',
       IN_USE: '使用中',
       MAINTENANCE: '维护中'
     };
 
-    // 生成24小时选项 (0-23小时)
+    async function initDefaultData() {
+      const users = await getAll('users');
+      if (users.length === 0) {
+        const defaultUsers = [
+          { id: 'admin_001', username: 'admin', password: 'admin123', role: 'admin', createdAt: new Date().toISOString() },
+          { id: 'user_001', username: 'user1', password: 'user123', role: 'user', createdAt: new Date().toISOString() }
+        ];
+        for (const user of defaultUsers) {
+          await put('users', user);
+        }
+      }
+
+      const instruments = await getAll('instruments');
+      if (instruments.length === 0) {
+        const defaultInstruments = [
+          { id: 'ins_1', name: '高效液相色谱仪', model: 'Agilent 1260', status: STATUS.AVAILABLE },
+          { id: 'ins_2', name: '紫外分光光度计', model: 'UV-2600', status: STATUS.AVAILABLE },
+          { id: 'ins_3', name: '高速离心机', model: 'Eppendorf 5424', status: STATUS.MAINTENANCE }
+        ];
+        for (const ins of defaultInstruments) {
+          await put('instruments', ins);
+        }
+      }
+    }
+
+    function generateId() {
+      return Date.now().toString(36) + Math.random().toString(36).substr(2, 8);
+    }
+
+    function formatDateTime(iso) {
+      const d = new Date(iso);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    }
+
+    function formatHour(hour) {
+      return String(hour).padStart(2, '0') + ':00';
+    }
+
     function generateHourOptions() {
       let options = '';
       for (let h = 0; h < 24; h++) {
@@ -295,52 +443,11 @@
     }
 
     const HOUR_OPTIONS = generateHourOptions();
-
-    // 默认管理员 + 普通用户
-    const DEFAULT_USERS = [
-      { id: 'admin_001', username: 'admin', password: 'admin123', role: 'admin', createdAt: new Date().toISOString() },
-      { id: 'user_001', username: 'user1', password: 'user123', role: 'user', createdAt: new Date().toISOString() }
-    ];
-
-    const DEFAULT_INSTRUMENTS = [
-      { id: 'ins_1', name: '高效液相色谱仪', model: 'Agilent 1260', status: STATUS.AVAILABLE },
-      { id: 'ins_2', name: '紫外分光光度计', model: 'UV-2600', status: STATUS.AVAILABLE },
-      { id: 'ins_3', name: '高速离心机', model: 'Eppendorf 5424', status: STATUS.MAINTENANCE }
-    ];
-
-    function initData() {
-      if (!localStorage.getItem(STORAGE.USERS)) localStorage.setItem(STORAGE.USERS, JSON.stringify(DEFAULT_USERS));
-      if (!localStorage.getItem(STORAGE.INSTRUMENTS)) localStorage.setItem(STORAGE.INSTRUMENTS, JSON.stringify(DEFAULT_INSTRUMENTS));
-      if (!localStorage.getItem(STORAGE.RECORDS)) localStorage.setItem(STORAGE.RECORDS, JSON.stringify([]));
-    }
-    initData();
-
-    const getUsers = () => JSON.parse(localStorage.getItem(STORAGE.USERS)) || [];
-    const getInstruments = () => JSON.parse(localStorage.getItem(STORAGE.INSTRUMENTS)) || [];
-    const getRecords = () => JSON.parse(localStorage.getItem(STORAGE.RECORDS)) || [];
-    const getCurrentUser = () => JSON.parse(localStorage.getItem(STORAGE.CURRENT));
-
-    function saveUsers(u) { localStorage.setItem(STORAGE.USERS, JSON.stringify(u)); }
-    function saveInstruments(i) { localStorage.setItem(STORAGE.INSTRUMENTS, JSON.stringify(i)); }
-    function saveRecords(r) { localStorage.setItem(STORAGE.RECORDS, JSON.stringify(r)); }
-    function setCurrentUser(user) { localStorage.setItem(STORAGE.CURRENT, JSON.stringify(user)); }
-    function clearCurrentUser() { localStorage.removeItem(STORAGE.CURRENT); }
-
-    function generateId() { return Date.now().toString(36) + Math.random().toString(36).substr(2, 8); }
-    function formatDateTime(iso) {
-      const d = new Date(iso);
-      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    }
-    
-    function formatHour(hour) {
-      return String(hour).padStart(2, '0') + ':00';
-    }
-
-    let currentUser = getCurrentUser();
+    let currentUser = null;
     const app = document.getElementById('appContainer');
 
-    // ---------- 界面渲染 ----------
-    function renderLogin() {
+    // ========== 界面渲染 ==========
+    async function renderLogin() {
       app.innerHTML = `
         <div class="screen">
           <div style="text-align:center; margin-top:35px;">
@@ -353,7 +460,13 @@
             <button class="btn" id="loginBtn">登 录</button>
             <button class="btn btn-outline" id="goRegister">注册新账号</button>
           </div>
-          <p class="text-muted" style="text-align:center; margin-top:15px;">默认管理员 admin / admin123</p>
+          <div class="alert">
+            💾 <strong>数据持久版说明：</strong><br>
+            • 使用IndexedDB存储，数据更稳定<br>
+            • 不会因清除缓存而丢失数据<br>
+            • 支持手动备份和恢复
+          </div>
+          <p class="text-muted" style="text-align:center;">默认管理员 admin / admin123</p>
           <p class="text-muted" style="text-align:center;">普通用户 user1 / user123</p>
         </div>
       `;
@@ -361,15 +474,16 @@
       document.getElementById('goRegister').onclick = renderRegister;
     }
 
-    function handleLogin() {
+    async function handleLogin() {
       const u = document.getElementById('loginUser').value.trim();
       const p = document.getElementById('loginPass').value.trim();
       if(!u||!p) return alert('请输入完整信息');
-      const user = getUsers().find(x => x.username === u && x.password === p);
+      const users = await getAll('users');
+      const user = users.find(x => x.username === u && x.password === p);
       if(!user) return alert('用户名或密码错误');
       currentUser = user;
-      setCurrentUser(user);
-      renderMain();
+      await put('currentUser', { id: 'current', user: user });
+      await renderMain();
     }
 
     function renderRegister() {
@@ -385,48 +499,50 @@
         </div>
       `;
       document.getElementById('backLogin').onclick = renderLogin;
-      document.getElementById('regSubmit').onclick = () => {
+      document.getElementById('regSubmit').onclick = async () => {
         const u = document.getElementById('regUser').value.trim();
         const p = document.getElementById('regPass').value.trim();
         if(!u||!p) return alert('填写完整');
         if(p.length<4) return alert('密码至少4位');
-        const users = getUsers();
+        const users = await getAll('users');
         if(users.find(x=>x.username===u)) return alert('用户名已存在');
-        users.push({ id: generateId(), username: u, password: p, role: 'user', createdAt: new Date().toISOString() });
-        saveUsers(users);
+        await put('users', { id: generateId(), username: u, password: p, role: 'user', createdAt: new Date().toISOString() });
         alert('注册成功！');
-        renderLogin();
+        await renderLogin();
       };
     }
 
-    function logout() {
-      clearCurrentUser();
+    async function logout() {
+      await remove('currentUser', 'current');
       currentUser = null;
-      renderLogin();
+      await renderLogin();
     }
 
-    function switchRole() {
+    async function switchRole() {
       if (!currentUser) return;
-      const users = getUsers();
+      const users = await getAll('users');
       const oppositeRole = currentUser.role === 'admin' ? 'user' : 'admin';
       const switchUser = users.find(u => u.role === oppositeRole);
       if (switchUser) {
         currentUser = switchUser;
-        setCurrentUser(switchUser);
-        renderMain();
+        await put('currentUser', { id: 'current', user: switchUser });
+        await renderMain();
         alert(`已切换为 ${oppositeRole === 'admin' ? '管理员' : '普通用户'} 账号：${switchUser.username}`);
       } else {
         alert(`没有${oppositeRole === 'admin' ? '管理员' : '普通用户'}账号可切换`);
       }
     }
 
-    function renderMain() {
-      if (!currentUser) { renderLogin(); return; }
-      const instruments = getInstruments();
-      const records = getRecords();
+    async function renderMain() {
+      if (!currentUser) {
+        await renderLogin();
+        return;
+      }
+      
+      const instruments = await getAll('instruments');
+      const records = await getAll('records');
       const isAdmin = currentUser.role === 'admin';
 
-      // 普通用户只显示可使用的仪器
       const availableInstruments = instruments.filter(i => i.status === STATUS.AVAILABLE);
       const instrumentOptions = (isAdmin ? instruments : availableInstruments).map(i => 
         `<option value="${i.id}">${i.name} (${i.model||'无型号'}) - ${i.status}</option>`
@@ -456,7 +572,10 @@
             <div class="divider"></div>
             <h4 style="margin-bottom:8px;">📊 全部使用者记录</h4>
             <div id="allRecordsContainer" style="max-height:180px; overflow-y:auto; background:white; border-radius:14px; padding:8px;"></div>
-            <button class="btn btn-export" id="exportExcelBtn">📥 一键导出Excel (CSV)</button>
+            <button class="btn btn-export" id="exportExcelBtn">📥 导出Excel (CSV)</button>
+            <button class="btn btn-backup" id="backupDataBtn">💾 备份所有数据</button>
+            <button class="btn btn-outline" id="restoreDataBtn" style="margin-top:4px;">📂 恢复数据备份</button>
+            <input type="file" id="restoreFileInput" accept=".json" style="display:none;">
           </div>
         `;
       }
@@ -469,7 +588,7 @@
               <div class="user-badge">
                 ${currentUser.role === 'admin' ? '🔑' : '👤'} ${currentUser.username}
               </div>
-              <button class="role-switch-btn" id="switchRoleBtn">⇄ 切换角色</button>
+              <button class="role-switch-btn" id="switchRoleBtn">⇄ 切换</button>
               <span class="logout-link" id="logoutBtn">退出</span>
             </div>
           </div>
@@ -480,17 +599,13 @@
             
             <label style="margin-top:14px;">⏱️ 使用时间段 (24小时灵活选择)</label>
             <div class="time-range-container">
-              <select id="startHourSelect">
-                ${HOUR_OPTIONS}
-              </select>
+              <select id="startHourSelect">${HOUR_OPTIONS}</select>
               <span class="time-separator">→</span>
-              <select id="endHourSelect">
-                ${HOUR_OPTIONS}
-              </select>
+              <select id="endHourSelect">${HOUR_OPTIONS}</select>
             </div>
-            <p class="hint-text">💡 开始时间必须早于结束时间，可精确到小时</p>
+            <p class="hint-text">💡 开始时间必须早于结束时间</p>
             
-            <button class="btn" id="registerUseBtn" style="margin-top:16px;">✅ 登记使用 (自动记录时间)</button>
+            <button class="btn" id="registerUseBtn" style="margin-top:16px;">✅ 登记使用</button>
           </div>
 
           <div class="card">
@@ -505,42 +620,28 @@
       document.getElementById('logoutBtn').onclick = logout;
       document.getElementById('switchRoleBtn').onclick = switchRole;
       
-      // 默认设置开始时间为8:00，结束时间为17:00
       const startSelect = document.getElementById('startHourSelect');
       const endSelect = document.getElementById('endHourSelect');
       if (startSelect && endSelect) {
-        startSelect.value = '8';  // 默认8:00
-        endSelect.value = '17';   // 默认17:00
+        startSelect.value = '8';
+        endSelect.value = '17';
       }
       
-      document.getElementById('registerUseBtn').onclick = () => {
+      document.getElementById('registerUseBtn').onclick = async () => {
         const insId = document.getElementById('instrumentSelect').value;
         const startHour = parseInt(document.getElementById('startHourSelect').value);
         const endHour = parseInt(document.getElementById('endHourSelect').value);
         
-        const ins = getInstruments().find(i => i.id === insId);
+        const instruments = await getAll('instruments');
+        const ins = instruments.find(i => i.id === insId);
         if (!ins) return alert('请选择仪器');
         if (ins.status !== STATUS.AVAILABLE) return alert('该仪器当前不可使用');
         
-        // 验证时间合理性
         if (startHour >= endHour) {
           return alert('开始时间必须早于结束时间！');
         }
         
         const timeSlot = `${formatHour(startHour)}-${formatHour(endHour)}`;
-        
-        // 检查时间冲突（同一仪器同一时间段不能重复登记）
-        const existingRecords = getRecords().filter(r => 
-          r.instrumentId === insId && 
-          r.timeSlot === timeSlot &&
-          r.userId !== currentUser.id
-        );
-        
-        if (existingRecords.length > 0) {
-          if (!confirm(`该仪器在 ${timeSlot} 时段已被其他人登记，是否继续登记？`)) {
-            return;
-          }
-        }
         
         const rec = {
           id: generateId(),
@@ -554,25 +655,39 @@
           createdAt: new Date().toISOString()
         };
         
-        const allRec = getRecords();
-        allRec.push(rec);
-        saveRecords(allRec);
-        alert(`登记成功！\n仪器：${ins.name}\n时间段：${timeSlot}\n登记时间：${formatDateTime(rec.createdAt)}`);
-        renderMain();
+        await put('records', rec);
+        alert(`登记成功！\n仪器：${ins.name}\n时间段：${timeSlot}`);
+        await renderMain();
       };
 
       if (isAdmin) {
-        renderAdminInstrumentList();
-        document.getElementById('addInsBtn').onclick = addInstrument;
-        renderAllRecords();
+        await renderAdminInstrumentList();
+        document.getElementById('addInsBtn').onclick = async () => {
+          const name = document.getElementById('newInsName').value.trim();
+          const model = document.getElementById('newInsModel').value.trim();
+          if (!name) return alert('仪器名称必填');
+          await put('instruments', {
+            id: generateId(),
+            name,
+            model,
+            status: STATUS.AVAILABLE
+          });
+          await renderMain();
+        };
+        await renderAllRecords();
         document.getElementById('exportExcelBtn').onclick = exportToExcel;
+        document.getElementById('backupDataBtn').onclick = backupAllData;
+        document.getElementById('restoreDataBtn').onclick = () => {
+          document.getElementById('restoreFileInput').click();
+        };
+        document.getElementById('restoreFileInput').onchange = restoreDataFromFile;
       }
     }
 
-    function renderAdminInstrumentList() {
+    async function renderAdminInstrumentList() {
       const listEl = document.getElementById('adminInsList');
       if (!listEl) return;
-      const instruments = getInstruments();
+      const instruments = await getAll('instruments');
       listEl.innerHTML = instruments.map(i => {
         let statusClass = '';
         if (i.status === STATUS.AVAILABLE) statusClass = 'status-available';
@@ -594,55 +709,37 @@
       }).join('');
 
       listEl.querySelectorAll('button').forEach(btn => {
-        btn.onclick = (e) => {
+        btn.onclick = async (e) => {
           const action = e.target.getAttribute('data-action');
           const id = e.target.getAttribute('data-id');
-          if (action === 'delete') deleteInstrument(id);
-          else if (action === 'status') changeInstrumentStatus(id);
+          if (action === 'delete') {
+            if (confirm('确定删除该仪器吗？')) {
+              await remove('instruments', id);
+              await renderMain();
+            }
+          } else if (action === 'status') {
+            const instruments = await getAll('instruments');
+            const ins = instruments.find(i => i.id === id);
+            if (!ins) return;
+            const statuses = [STATUS.AVAILABLE, STATUS.IN_USE, STATUS.MAINTENANCE];
+            const currentIndex = statuses.indexOf(ins.status);
+            const nextIndex = (currentIndex + 1) % statuses.length;
+            const newStatus = statuses[nextIndex];
+            if (confirm(`将 ${ins.name} 状态从 [${ins.status}] 改为 [${newStatus}] 吗？`)) {
+              ins.status = newStatus;
+              await put('instruments', ins);
+              await renderMain();
+            }
+          }
         };
       });
     }
 
-    function addInstrument() {
-      const name = document.getElementById('newInsName').value.trim();
-      const model = document.getElementById('newInsModel').value.trim();
-      if (!name) return alert('仪器名称必填');
-      const instruments = getInstruments();
-      instruments.push({
-        id: generateId(),
-        name,
-        model,
-        status: STATUS.AVAILABLE
-      });
-      saveInstruments(instruments);
-      renderMain();
-    }
-
-    function deleteInstrument(id) {
-      if (!confirm('确定删除该仪器吗？')) return;
-      saveInstruments(getInstruments().filter(i => i.id !== id));
-      renderMain();
-    }
-
-    function changeInstrumentStatus(id) {
-      const instruments = getInstruments();
-      const ins = instruments.find(i => i.id === id);
-      if (!ins) return;
-      const statuses = [STATUS.AVAILABLE, STATUS.IN_USE, STATUS.MAINTENANCE];
-      const currentIndex = statuses.indexOf(ins.status);
-      const nextIndex = (currentIndex + 1) % statuses.length;
-      const newStatus = statuses[nextIndex];
-      if (confirm(`将 ${ins.name} 状态从 [${ins.status}] 改为 [${newStatus}] 吗？`)) {
-        ins.status = newStatus;
-        saveInstruments(instruments);
-        renderMain();
-      }
-    }
-
-    function renderAllRecords() {
+    async function renderAllRecords() {
       const container = document.getElementById('allRecordsContainer');
       if (!container) return;
-      const records = getRecords().sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+      const records = await getAll('records');
+      records.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
       if (records.length === 0) {
         container.innerHTML = '<div class="empty-message">暂无登记记录</div>';
         return;
@@ -657,13 +754,13 @@
       `).join('');
     }
 
-    function exportToExcel() {
-      const records = getRecords().sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+    async function exportToExcel() {
+      const records = await getAll('records');
+      records.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
       if (records.length === 0) {
         alert('没有记录可导出');
         return;
       }
-      // 生成CSV (Excel可直接打开)
       let csv = '\uFEFF用户名,仪器名称,使用时间段,登记时间\n';
       records.forEach(r => {
         csv += `"${r.username}","${r.instrumentName}","${r.timeSlot}","${formatDateTime(r.createdAt)}"\n`;
@@ -675,12 +772,101 @@
       a.download = `仪器使用记录_${new Date().toISOString().slice(0,10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-      alert('导出成功！');
     }
 
-    // 启动
-    if (currentUser) renderMain();
-    else renderLogin();
+    // 备份所有数据到JSON文件
+    async function backupAllData() {
+      const users = await getAll('users');
+      const instruments = await getAll('instruments');
+      const records = await getAll('records');
+      
+      const backupData = {
+        version: '1.0',
+        backupDate: new Date().toISOString(),
+        users: users,
+        instruments: instruments,
+        records: records
+      };
+      
+      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `仪器系统备份_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      alert('✅ 数据备份成功！');
+    }
+
+    // 从JSON文件恢复数据
+    async function restoreDataFromFile(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      if (!confirm('⚠️ 恢复数据会覆盖当前所有数据，确定继续吗？')) {
+        event.target.value = '';
+        return;
+      }
+      
+      try {
+        const text = await file.text();
+        const backupData = JSON.parse(text);
+        
+        if (!backupData.users || !backupData.instruments || !backupData.records) {
+          throw new Error('备份文件格式不正确');
+        }
+        
+        // 清空现有数据
+        await clearStore('users');
+        await clearStore('instruments');
+        await clearStore('records');
+        
+        // 恢复数据
+        for (const user of backupData.users) {
+          await put('users', user);
+        }
+        for (const ins of backupData.instruments) {
+          await put('instruments', ins);
+        }
+        for (const rec of backupData.records) {
+          await put('records', rec);
+        }
+        
+        alert('✅ 数据恢复成功！请重新登录。');
+        await logout();
+        event.target.value = '';
+      } catch (error) {
+        alert('❌ 恢复失败：' + error.message);
+        event.target.value = '';
+      }
+    }
+
+    // ========== 启动应用 ==========
+    async function initApp() {
+      try {
+        await openDB();
+        await initDefaultData();
+        
+        // 检查是否有保存的登录状态
+        const savedUsers = await getAll('currentUser');
+        if (savedUsers.length > 0) {
+          currentUser = savedUsers[0].user;
+          await renderMain();
+        } else {
+          await renderLogin();
+        }
+      } catch (error) {
+        app.innerHTML = `
+          <div class="screen" style="justify-content: center; align-items: center;">
+            <h2>❌ 错误</h2>
+            <p>${error.message}</p>
+            <button class="btn" onclick="location.reload()">重试</button>
+          </div>
+        `;
+      }
+    }
+
+    initApp();
   })();
 </script>
 </body>
